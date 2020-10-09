@@ -1,0 +1,1472 @@
+---
+title: "Emory HCW Serosurvey-- Analysis Simplified"
+author: "Julia Baker & Kristin Nelson"
+date: "10/09/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, results="hide", message=FALSE, warning=FALSE}
+# load libraries
+  library(tidyverse)
+  library(data.table)
+  library(dplyr)
+  library(readxl)
+  library(knitr)
+  library(kableExtra)
+  library(questionr)
+  library(ggplot2)
+  library(stats)
+  library(survey)
+  library(boot)
+
+
+# set working directory
+  setwd("/Users/juliabaker/Box Sync/Emory HCW serosurvey/Analysis/")
+
+# load serosurvey data
+  sero <- read_excel("/Users/juliabaker/Box Sync/Emory HCW serosurvey/Data/EHC_serology_results_with_zip_2020.07.28.xlsx")
+  # 10,281 observations, 100 variables 
+```
+<br/>  
+  
+### Data cleaning
+  
+Notes:
+
+* Data received July 28, 2020
+* 10,281 observations total
+* Identified and dropped duplicate participant IDs (3 of them) -- 10,275 observations remaining
+* Dropped 665 missing cumulative incidence data for zip code -- 9,610 observations remaining
+* Reformatted variables
+    
+    
+#### Incidence (by zip code)
+* Cumulative incidence calculated for each GA zip code by calendar week using GDPH PUI data
+* Incidence data linked to survey participants using the week of serology testing and zip code
+* **Incidence**- cumulative incidence two weeks prior to the serology test date
+* **Log(incidence)**- incidence variable scaled
+<br/>
+<br/>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+# change week of serology test to character variable  
+  sero$week_ch <- as.character(sero$week)
+  # variable for week of year
+    sero$week_num <- ifelse(sero$week_ch == "2020-04-19", 17,
+                     ifelse(sero$week_ch == "2020-04-26", 18,
+                     ifelse(sero$week_ch == "2020-05-03", 19,
+                     ifelse(sero$week_ch == "2020-05-10", 20,
+                     ifelse(sero$week_ch == "2020-05-17", 21,
+                     ifelse(sero$week_ch == "2020-05-24", 22,
+                     ifelse(sero$week_ch == "2020-05-31", 23,
+                     ifelse(sero$week_ch == "2020-06-07", 24,
+                     ifelse(sero$week_ch == "2020-06-14", 25,
+                     ifelse(sero$week_ch == "2020-06-21", 26, NA))))))))))
+    #table(sero$week_ch, sero$week_num, exclude=NULL)
+    sero$week_lag <- sero$week_num - 2
+
+# merge data
+  # pull in & format GADPH PUI cumulative incidence by week data
+    zip_inc <- read.csv("/Users/juliabaker/Box Sync/Emory HCW serosurvey/Data/inc.byzip.bywk.csv")
+    zip_inc <- zip_inc[c(2,3,5)]
+    names(zip_inc)[names(zip_inc) == "Zip_Residence_trunc"] <- "zip"
+    names(zip_inc)[names(zip_inc) == "week"] <- "week_lag"
+    names(zip_inc)[names(zip_inc) == "cuminc.bywk"] <- "inc"
+  # duplicate zip column in survey dataset
+    sero$zip_code <- sero$zip
+  # merge with survey data
+    sero = merge(sero, zip_inc, all.x = TRUE)
+# log10(incidence)
+  sero$log_inc <- log10(sero$inc)
+  
+# drop variables without cumulative incidence data
+  sero <- sero[!is.na(sero$inc),]
+```
+
+### Descriptive stats
+<br/>
+
+```{r, echo=FALSE, message=FALSE}
+
+# serology
+  # results
+    sero_uni <- data.frame(sero %>% group_by(result) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+    # format
+      names(sero_uni)[names(sero_uni) == 'result'] <- 'category'
+      sero_uni$variable <- "COVID-19 sero result"
+      sero_uni$n_pos <- NA
+
+    # create 0/1 variable
+      sero$covid <- ifelse(sero$result == "Positive", 1,
+                    ifelse(sero$result == "Negative", 0, NA))
+      covid_uni <- data.frame(sero %>% group_by(covid) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      
+      #prop.test(555, 9610, conf.level=0.95, correct = FALSE)
+      
+    # format
+      names(covid_uni)[names(covid_uni) == 'covid'] <- 'category'
+      covid_uni$variable <- "COVID-19 sero result"
+      covid_uni$n_pos <- NA
+
+  # week of test
+    # freq for variable levels, freq positive, combine
+      week_freq <- data.frame(sero %>% group_by(week_ch) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      week_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(week_ch) %>% summarise(n_pos=n()))
+        # adding 0 for freq pos for week 2020-06-21 b/c none
+          week_freq_pos[nrow(week_freq_pos) + 1,] = c("2020-06-21",0)
+          week_freq_pos$n_pos <- as.numeric(week_freq_pos$n_pos)
+      week_uni <- merge(week_freq, week_freq_pos)
+    # format   
+      names(week_uni)[names(week_uni) == 'week_ch'] <- 'category'
+      week_uni$variable <- "Week of test"
+
+    
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_sero <- rbind(covid_uni, week_uni)
+  # reorder columns, calculate percent positive
+    uni_results_sero <- uni_results_sero[, c(4,1,2,3,5)]
+    uni_results_sero$prop <- uni_results_sero$prop*100
+    uni_results_sero$perc_pos <- uni_results_sero$n_pos/uni_results_sero$n*100
+  # format
+    uni_results_sero$prop <- format(round(uni_results_sero$prop, digits=1), nsmall=1)
+    uni_results_sero$perc_pos <- format(round(uni_results_sero$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_sero$prop_percent_part1 <- paste(uni_results_sero$n, uni_results_sero$prop, sep=" (")
+      uni_results_sero$prop_percent_part2 <- ")"
+      uni_results_sero$prop_percent <- paste(uni_results_sero$prop_percent_part1, uni_results_sero$prop_percent_part2, sep="")
+          uni_results_sero$prop_percent_part1 <- NULL
+          uni_results_sero$prop_percent_part2 <- NULL
+      uni_results_sero$pos_percent_part1 <- paste(uni_results_sero$n_pos, uni_results_sero$perc_pos, sep=" (")
+      uni_results_sero$pos_percent_part2 <- ")"
+      uni_results_sero$pos_percent <- paste(uni_results_sero$pos_percent_part1, uni_results_sero$pos_percent_part2, sep="")
+          uni_results_sero$pos_percent_part1 <- NULL
+          uni_results_sero$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_sero_table <- uni_results_sero %>% dplyr::select(variable, category, prop_percent, pos_percent)
+    # format variable names, category codes
+      names(uni_results_sero_table)[names(uni_results_sero_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_sero_table)[names(uni_results_sero_table) == "pos_percent"] <- "n positive (%)"
+      uni_results_sero_table$category <- ifelse(uni_results_sero_table$category == 0, "neg",
+                                         ifelse(uni_results_sero_table$category == 1, "pos", uni_results_sero_table$category))
+    # print table  
+      kable(uni_results_sero_table, format = "html", table.attr = "style='width:60%;'")
+```
+<br/>
+
+```{r, echo=FALSE, message=FALSE}
+# demographics
+
+  # age group
+    sero$age_group <- ifelse(sero$age < 30, "<30",
+                      ifelse(sero$age < 40, "30-39",
+                      ifelse(sero$age < 50, "40-49",
+                      ifelse(sero$age < 60, "50-59",
+                      ifelse(sero$age >=60, "60+", NA)))))
+    sero$age_group <- relevel(as.factor(sero$age_group), ref = "60+")
+    # freq for variable levels, freq positive, combine
+      age_group_freq <- data.frame(sero %>% group_by(age_group) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      age_group_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(age_group) %>% summarise(n_pos=n()))
+      age_group_uni <- merge(age_group_freq, age_group_freq_pos)
+    # format   
+      names(age_group_uni)[names(age_group_uni) == 'age_group'] <- 'category'
+      age_group_uni$variable <- "Age group"
+
+  # sex
+    sero$sex <- ifelse(sero$male == 1, "male",
+                ifelse(sero$male == 0, "female", "not specified"))
+    # freq for variable levels, freq positive, combine
+      sex_freq <- data.frame(sero %>% group_by(sex) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      sex_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(sex) %>% summarise(n_pos=n()))
+      sex_uni <- merge(sex_freq, sex_freq_pos)
+    # format
+      names(sex_uni)[names(sex_uni) == 'sex'] <- 'category'
+      sex_uni$variable <- "Sex"
+      
+  # race
+    sero$race_num <- sero$black + sero$white + sero$am_ind + sero$asian + sero$pac_isl
+    sero$race <- ifelse(sero$race_num > 1, "Multiracial",
+                 ifelse(sero$black == 1, "Black",
+                 ifelse(sero$white == 1, "White",
+                 ifelse(sero$am_ind == 1, "American Indian/AK Native",
+                 ifelse(sero$asian == 1, "Asian",
+                 ifelse(sero$pac_isl == 1, "Native HI/Pacific Islander", "not specified"))))))
+    sero$race <- relevel(as.factor(sero$race), ref = "White")
+    # freq for variable levels, freq positive, combine
+      race_freq <- data.frame(sero %>% group_by(race) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      race_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(race) %>% summarise(n_pos=n()))
+        # adding 0 for freq pos for native HI/Pacific Islander b/c none
+          race_freq_pos[nrow(race_freq_pos) + 1,] = c("Native HI/Pacific Islander",0)
+          race_freq_pos$n_pos <- as.numeric(race_freq_pos$n_pos)
+      race_uni <- merge(race_freq, race_freq_pos)
+    # format
+      names(race_uni)[names(race_uni) == 'race'] <- 'category'
+      race_uni$variable <- "Race"
+      
+  # ethnicity
+    sero$eth <- ifelse(sero$hisp == 1, "Hispanic", 
+                ifelse(sero$hisp == 0, "non-Hispanic", "not specified"))
+    sero$eth <- relevel(as.factor(sero$eth), ref = "non-Hispanic")
+    # freq for variable levels, freq positive, combine
+      eth_freq <- data.frame(sero %>% group_by(eth) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      eth_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(eth) %>% summarise(n_pos=n()))
+      eth_uni <- merge(eth_freq, eth_freq_pos)
+    # format
+      names(eth_uni)[names(eth_uni) == 'eth'] <- 'category'
+      eth_uni$variable <- "Ethnicity"
+      
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_demo <- rbind(age_group_uni, sex_uni, race_uni, eth_uni)
+  # reorder columns, calculate percent positive
+    uni_results_demo <- uni_results_demo[, c(5,1,2,3,4)]
+    uni_results_demo$prop <- uni_results_demo$prop*100
+    uni_results_demo$perc_pos <- uni_results_demo$n_pos/uni_results_demo$n*100
+  # format
+    uni_results_demo$prop <- format(round(uni_results_demo$prop, digits=1), nsmall=1)
+    uni_results_demo$perc_pos <- format(round(uni_results_demo$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_demo$prop_percent_part1 <- paste(uni_results_demo$n, uni_results_demo$prop, sep=" (")
+      uni_results_demo$prop_percent_part2 <- ")"
+      uni_results_demo$prop_percent <- paste(uni_results_demo$prop_percent_part1, uni_results_demo$prop_percent_part2, sep="")
+          uni_results_demo$prop_percent_part1 <- NULL
+          uni_results_demo$prop_percent_part2 <- NULL
+      uni_results_demo$pos_percent_part1 <- paste(uni_results_demo$n_pos, uni_results_demo$perc_pos, sep=" (")
+      uni_results_demo$pos_percent_part2 <- ")"
+      uni_results_demo$pos_percent <- paste(uni_results_demo$pos_percent_part1, uni_results_demo$pos_percent_part2, sep="")
+          uni_results_demo$pos_percent_part1 <- NULL
+          uni_results_demo$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_demo_table <- uni_results_demo %>% dplyr::select(variable, category, prop_percent, pos_percent)
+    # format variable names, category codes
+      names(uni_results_demo_table)[names(uni_results_demo_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_demo_table)[names(uni_results_demo_table) == "pos_percent"] <- "n positive (%)"
+    # print table  
+      kable(uni_results_demo_table, format = "html", table.attr = "style='width:60%;'")
+```
+<br/>
+
+
+#### Workplace role/location
+
+* **Job role**- as selected in survey (9 possible roles)
+* **Job location**- as selected in the survey (13 locations possible)
+* **Number of job locations**- survey participants could select more than one if they split their time equally
+* **Job location category**- collapses "job location" into categories  
+    * 1. _ED_: emergency department
+    * 2. _COVID-19 focused_: medical-surgical focused on COVID-19 patients; ICU focused on COVID-19 patients; clinic focused on COVID-19 patients
+    * 3. _Inpatient not COVID-19 focused_: medical-surgical-not focused on COVID-19 patients; ICU-not focused on COVID-19 patients
+    * 4. _Outpatient clinical_: clinic not focused on COVID-19 patients
+    * 5. _OR/procedure_: OR or peri-operative area; other procedure area
+    * 6. _Other hospital area_: other hospital area
+    * 7. _No patient contact_: non-clinical area of hosp/clinic; not in hospital or clinic;
+    * 8. _Work from home_: worked from home
+    * 9. _Not specified_: no job location selected in survey
+  * Hierarchy set up to classify participant into one category (even if multiple job locations were selected) in the order above
+    * Example: if participant selected "ED" and "OR or peri-operative area" s/he would be classified as "ED"
+<br/> 
+<br/>
+
+```{r, echo=FALSE, message=FALSE}
+    
+# workplace role
+  sero$job_role <- relevel(as.factor(sero$job_role), ref = "Other with no patient contact")
+  job_role_uni <- data.frame(questionr::freq(sero$job_role, val = FALSE))
+  # freq for variable levels, freq positive, combine
+    job_role_freq <- data.frame(sero %>% group_by(job_role) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+    job_role_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(job_role) %>% summarise(n_pos=n()))
+    job_role_uni <- merge(job_role_freq, job_role_freq_pos)
+  # format
+    names(job_role_uni)[names(job_role_uni) == 'job_role'] <- 'category'
+    job_role_uni$variable <- "Job role"
+    
+    
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_job_role <- job_role_uni
+  # reorder columns, calculate percent positive
+    uni_results_job_role <- uni_results_job_role[, c(5,1,2,3,4)]
+    uni_results_job_role$prop <- uni_results_job_role$prop*100
+    uni_results_job_role$perc_pos <- uni_results_job_role$n_pos/uni_results_job_role$n*100
+  # format
+    uni_results_job_role$prop <- format(round(uni_results_job_role$prop, digits=1), nsmall=1)
+    uni_results_job_role$perc_pos <- format(round(uni_results_job_role$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_job_role$prop_percent_part1 <- paste(uni_results_job_role$n, uni_results_job_role$prop, sep=" (")
+      uni_results_job_role$prop_percent_part2 <- ")"
+      uni_results_job_role$prop_percent <- paste(uni_results_job_role$prop_percent_part1, uni_results_job_role$prop_percent_part2, sep="")
+          uni_results_job_role$prop_percent_part1 <- NULL
+          uni_results_job_role$prop_percent_part2 <- NULL
+      uni_results_job_role$pos_percent_part1 <- paste(uni_results_job_role$n_pos, uni_results_job_role$perc_pos, sep=" (")
+      uni_results_job_role$pos_percent_part2 <- ")"
+      uni_results_job_role$pos_percent <- paste(uni_results_job_role$pos_percent_part1, uni_results_job_role$pos_percent_part2, sep="")
+          uni_results_job_role$pos_percent_part1 <- NULL
+          uni_results_job_role$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_job_role_table <- uni_results_job_role %>% dplyr::select(variable, category, prop_percent, pos_percent)
+    # format variable names, category codes
+      names(uni_results_job_role_table)[names(uni_results_job_role_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_job_role_table)[names(uni_results_job_role_table) == "pos_percent"] <- "n positive (%)"
+    # print table  
+      kable(uni_results_job_role_table, format = "html", table.attr = "style='width:60%;'")
+```
+<br/>  
+
+```{r, echo=FALSE, message=FALSE}
+# job location
+  # variable indicating number of locations
+    sero$job_loc_sum <- sero$ms_cohort + sero$ms_no_cohort + sero$icu_cohort + sero$icu_no_cohort + sero$periop + 
+                        sero$proc + sero$ed + sero$other_area + sero$clin_cohort + sero$clin_no_cohort + 
+                        sero$non_clin + sero$not_hc + sero$wfh
+    job_loc_sum_uni <-  data.frame(questionr::freq(sero$job_loc_sum, val = FALSE))
+    # format
+      setDT(job_loc_sum_uni, keep.rownames = "num_of_job_loc")
+      names(job_loc_sum_uni)[names(job_loc_sum_uni) == "X."] <- "percent"
+    # print table  
+      kable(job_loc_sum_uni, format = "html", table.attr = "style='width:40%;'")
+      
+      
+```
+<br/>  
+
+```{r, echo=FALSE, message=FALSE}       
+  # summarize n at each location
+    # ms cohort
+      # freq for variable levels, freq positive, combine
+        ms_cohort_freq <- data.frame(sero %>% group_by(ms_cohort) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        ms_cohort_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ms_cohort) %>% summarise(n_pos=n()))
+        ms_cohort_uni <- merge(ms_cohort_freq, ms_cohort_freq_pos)
+      # format
+        names(ms_cohort_uni)[names(ms_cohort_uni) == 'ms_cohort'] <- 'category'
+        ms_cohort_uni <- ms_cohort_uni[which(ms_cohort_uni$category == 1), ]
+        ms_cohort_uni$category <- "medical-surgical- focused on COVID-19 patients"
+    # ms no cohort
+      # freq for variable levels, freq positive, combine
+        ms_no_cohort_freq <- data.frame(sero %>% group_by(ms_no_cohort) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        ms_no_cohort_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ms_no_cohort) %>% summarise(n_pos=n()))
+        ms_no_cohort_uni <- merge(ms_no_cohort_freq, ms_no_cohort_freq_pos)
+      # format
+        names(ms_no_cohort_uni)[names(ms_no_cohort_uni) == 'ms_no_cohort'] <- 'category'
+        ms_no_cohort_uni <- ms_no_cohort_uni[which(ms_no_cohort_uni$category == 1), ]
+        ms_no_cohort_uni$category <- "medical-surgical- not focused on COVID-19 patients"
+    # icu cohort
+      # freq for variable levels, freq positive, combine
+        icu_cohort_freq <- data.frame(sero %>% group_by(icu_cohort) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        icu_cohort_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(icu_cohort) %>% summarise(n_pos=n()))
+        icu_cohort_uni <- merge(icu_cohort_freq, icu_cohort_freq_pos)
+      # format
+        names(icu_cohort_uni)[names(icu_cohort_uni) == 'icu_cohort'] <- 'category'
+        icu_cohort_uni <- icu_cohort_uni[which(icu_cohort_uni$category == 1), ]
+        icu_cohort_uni$category <- "ICU- focused on COVID-19 patients"  
+    # icu no cohort
+      # freq for variable levels, freq positive, combine
+        icu_no_cohort_freq <- data.frame(sero %>% group_by(icu_no_cohort) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        icu_no_cohort_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(icu_no_cohort) %>% summarise(n_pos=n()))
+        icu_no_cohort_uni <- merge(icu_no_cohort_freq, icu_no_cohort_freq_pos)
+      # format
+        names(icu_no_cohort_uni)[names(icu_no_cohort_uni) == 'icu_no_cohort'] <- 'category'
+        icu_no_cohort_uni <- icu_no_cohort_uni[which(icu_no_cohort_uni$category == 1), ]
+        icu_no_cohort_uni$category <- "ICU- not focused on COVID-19 patients"  
+    # periop
+      # freq for variable levels, freq positive, combine
+        periop_freq <- data.frame(sero %>% group_by(periop) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        periop_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(periop) %>% summarise(n_pos=n()))
+        periop_uni <- merge(periop_freq, periop_freq_pos)
+      # format
+        names(periop_uni)[names(periop_uni) == 'periop'] <- 'category'
+        periop_uni <- periop_uni[which(periop_uni$category == 1), ]
+        periop_uni$category <- "OR or peri-operative area"    
+    # proc
+      # freq for variable levels, freq positive, combine
+        proc_freq <- data.frame(sero %>% group_by(proc) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        proc_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(proc) %>% summarise(n_pos=n()))
+        proc_uni <- merge(proc_freq, proc_freq_pos)
+      # format
+        names(proc_uni)[names(proc_uni) == 'proc'] <- 'category'
+        proc_uni <- proc_uni[which(proc_uni$category == 1), ]
+        proc_uni$category <- "other procedure area" 
+    # emergency department
+      # freq for variable levels, freq positive, combine
+        ed_freq <- data.frame(sero %>% group_by(ed) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        ed_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ed) %>% summarise(n_pos=n()))
+        ed_uni <- merge(ed_freq, ed_freq_pos)
+      # format
+        names(ed_uni)[names(ed_uni) == 'ed'] <- 'category'
+        ed_uni <- ed_uni[which(ed_uni$category == 1), ]
+        ed_uni$category <- "emergency department"   
+    # other hospital area
+      # freq for variable levels, freq positive, combine
+        other_area_freq <- data.frame(sero %>% group_by(other_area) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        other_area_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(other_area) %>% summarise(n_pos=n()))
+        other_area_uni <- merge(other_area_freq, other_area_freq_pos)
+      # format
+        names(other_area_uni)[names(other_area_uni) == 'other_area'] <- 'category'
+        other_area_uni <- other_area_uni[which(other_area_uni$category == 1), ]
+        other_area_uni$category <- "other hospital area"        
+    # clinic cohort
+      # freq for variable levels, freq positive, combine
+        clin_cohort_freq <- data.frame(sero %>% group_by(clin_cohort) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        clin_cohort_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(clin_cohort) %>% summarise(n_pos=n()))
+        clin_cohort_uni <- merge(clin_cohort_freq, clin_cohort_freq_pos)
+      # format
+        names(clin_cohort_uni)[names(clin_cohort_uni) == 'clin_cohort'] <- 'category'
+        clin_cohort_uni <- clin_cohort_uni[which(clin_cohort_uni$category == 1), ]
+        clin_cohort_uni$category <- "clinic- focused on COVID-19 patients"   
+    # clinic no cohort
+      # freq for variable levels, freq positive, combine
+        clin_no_cohort_freq <- data.frame(sero %>% group_by(clin_no_cohort) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        clin_no_cohort_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(clin_no_cohort) %>% summarise(n_pos=n()))
+        clin_no_cohort_uni <- merge(clin_no_cohort_freq, clin_no_cohort_freq_pos)
+      # format
+        names(clin_no_cohort_uni)[names(clin_no_cohort_uni) == 'clin_no_cohort'] <- 'category'
+        clin_no_cohort_uni <- clin_no_cohort_uni[which(clin_no_cohort_uni$category == 1), ]
+        clin_no_cohort_uni$category <- "clinic- not focused on COVID-19 patients"   
+    # non clinical
+      # freq for variable levels, freq positive, combine
+        non_clin_freq <- data.frame(sero %>% group_by(non_clin) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        non_clin_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(non_clin) %>% summarise(n_pos=n()))
+        non_clin_uni <- merge(non_clin_freq, non_clin_freq_pos)
+      # format
+        names(non_clin_uni)[names(non_clin_uni) == 'non_clin'] <- 'category'
+        non_clin_uni <- non_clin_uni[which(non_clin_uni$category == 1), ]
+        non_clin_uni$category <- "non-clinical area of hospital or clinic" 
+    # not hospital/clinic
+      # freq for variable levels, freq positive, combine
+        not_hc_freq <- data.frame(sero %>% group_by(not_hc) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        not_hc_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(not_hc) %>% summarise(n_pos=n()))
+        not_hc_uni <- merge(not_hc_freq, not_hc_freq_pos)
+      # format
+        names(not_hc_uni)[names(not_hc_uni) == 'not_hc'] <- 'category'
+        not_hc_uni <- not_hc_uni[which(not_hc_uni$category == 1), ]
+        not_hc_uni$category <- "not in hospital or clinic" 
+    # work from home
+      # freq for variable levels, freq positive, combine
+        wfh_freq <- data.frame(sero %>% group_by(wfh) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        wfh_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(wfh) %>% summarise(n_pos=n()))
+        wfh_uni <- merge(wfh_freq, wfh_freq_pos)
+      # format
+        names(wfh_uni)[names(wfh_uni) == 'wfh'] <- 'category'
+        wfh_uni <- wfh_uni[which(wfh_uni$category == 1), ]
+        wfh_uni$category <- "work from home" 
+
+    job_loc_comb <- rbind(ms_cohort_uni, ms_no_cohort_uni, icu_cohort_uni, icu_no_cohort_uni, periop_uni, 
+                          proc_uni, ed_uni, other_area_uni, clin_cohort_uni, clin_no_cohort_uni, non_clin_uni, 
+                          not_hc_uni, wfh_uni)
+    job_loc_comb$variable <- "Job location"
+
+  # 9 level categorization including "not specified") and hierarchy
+    sero$job_loc_cat_9 <- ifelse(sero$ed == 1, "ED",
+                          ifelse((sero$ms_cohort == 1 | sero$icu_cohort == 1 | sero$clin_cohort == 1), "COVID-19 focused",
+                          ifelse((sero$ms_no_cohort == 1 | sero$icu_no_cohort == 1), "Inpatient not COVID-19 focused",
+                          ifelse(sero$clin_no_cohort ==1, "Outpatient clinical",
+                          ifelse((sero$periop == 1 | sero$proc == 1), "OR/procedure",
+                          ifelse(sero$other_area == 1, "Other hospital area",
+                          ifelse((sero$non_clin == 1 | sero$not_hc == 1), "No patient contact",
+                          ifelse(sero$wfh == 1, "Work from home",
+                          "Not specified"))))))))
+    sero$job_loc_cat_9 <- relevel(as.factor(sero$job_loc_cat_9), ref = "No patient contact") 
+    # freq for variable levels, freq positive, combine
+      job_loc_cat_9_freq <- data.frame(sero %>% group_by(job_loc_cat_9) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      job_loc_cat_9_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(job_loc_cat_9) %>% summarise(n_pos=n()))
+      job_loc_cat_9_uni <- merge(job_loc_cat_9_freq, job_loc_cat_9_freq_pos)
+    # format
+      names(job_loc_cat_9_uni)[names(job_loc_cat_9_uni) == 'job_loc_cat_9'] <- 'category'
+      job_loc_cat_9_uni$variable <- "Job location (categ)"
+
+
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_job_loc <- rbind(job_loc_comb, job_loc_cat_9_uni)
+  # reorder columns, calculate percent positive
+    uni_results_job_loc <- uni_results_job_loc[, c(5,1,2,3,4)]
+    uni_results_job_loc$prop <- uni_results_job_loc$prop*100
+    uni_results_job_loc$perc_pos <- uni_results_job_loc$n_pos/uni_results_job_loc$n*100
+  # format
+    uni_results_job_loc$prop <- format(round(uni_results_job_loc$prop, digits=1), nsmall=1)
+    uni_results_job_loc$perc_pos <- format(round(uni_results_job_loc$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_job_loc$prop_percent_part1 <- paste(uni_results_job_loc$n, uni_results_job_loc$prop, sep=" (")
+      uni_results_job_loc$prop_percent_part2 <- ")"
+      uni_results_job_loc$prop_percent <- paste(uni_results_job_loc$prop_percent_part1, uni_results_job_loc$prop_percent_part2, sep="")
+          uni_results_job_loc$prop_percent_part1 <- NULL
+          uni_results_job_loc$prop_percent_part2 <- NULL
+      uni_results_job_loc$pos_percent_part1 <- paste(uni_results_job_loc$n_pos, uni_results_job_loc$perc_pos, sep=" (")
+      uni_results_job_loc$pos_percent_part2 <- ")"
+      uni_results_job_loc$pos_percent <- paste(uni_results_job_loc$pos_percent_part1, uni_results_job_loc$pos_percent_part2, sep="")
+          uni_results_job_loc$pos_percent_part1 <- NULL
+          uni_results_job_loc$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_job_loc_table <- uni_results_job_loc %>% dplyr::select(variable, category, prop_percent, pos_percent)
+      rownames(uni_results_job_loc_table) <- NULL
+    # format variable names, category codes
+      names(uni_results_job_loc_table)[names(uni_results_job_loc_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_job_loc_table)[names(uni_results_job_loc_table) == "pos_percent"] <- "n positive (%)"
+    # print table  
+      kable(uni_results_job_loc_table, format = "html", table.attr = "style='width:80%;'")      
+      
+```
+<br/> 
+
+#### Comumnity contact  
+* **Community contact**- close contact with person confirmed/suspected to have COVID-19
+* **Community contact days**- number of days of close contact with person confirmed/suspected to have COVID-19
+* **Community contact relationship**- relationship to person confirmed/suspected to have COVID-19 (could select multiple)
+  * Hierarchy so participants are categorized into one group
+  * Immediate family/roommate  >  other family/friend  >  medical provider/other
+* **Known community exposure location**- whether participant indicated a location where community exposure was thought to have occurred
+<br/> 
+<br/>
+
+```{r, echo=FALSE, message=FALSE}
+# community contacts  
+  # freq for variable levels, freq positive, combine
+      com_cont_freq <- data.frame(sero %>% group_by(any_com_cont) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      com_cont_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(any_com_cont) %>% summarise(n_pos=n()))
+      com_cont_uni <- merge(com_cont_freq, com_cont_freq_pos)
+    # format
+      names(com_cont_uni)[names(com_cont_uni) == 'any_com_cont'] <- 'category'
+      com_cont_uni$variable <- "Community contact"
+
+# community contact days
+  # format variable into ordered factor
+    sero$com_cont_days <- ifelse(sero$cont_days == 1, "1-5", 
+                          ifelse(sero$cont_days == 2, "6-10",
+                          ifelse(sero$cont_days == 3, "11+", NA)))
+    sero$com_cont_days <- relevel(as.factor(sero$com_cont_days), ref = "1-5")
+    # freq for variable levels, freq positive, combine
+      com_days_freq <- data.frame(sero %>% group_by(com_cont_days) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      com_days_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(com_cont_days) %>% summarise(n_pos=n()))
+      com_days_uni <- merge(com_days_freq, com_days_freq_pos)
+    # format
+      names(com_days_uni)[names(com_days_uni) == 'com_cont_days'] <- 'category'
+      com_days_uni$variable <- "Community contact days"
+
+# community contact person
+  # collapsed community contact relationship variable (can have multiple contacts but this variable only accounts for one)
+    sero$com_cont_relat <- ifelse((sero$spouse == 1 | sero$child == 1 | sero$rm == 1), "immediate family/roommate",
+                           ifelse((sero$fam == 1 | sero$friend == 1), "other family/friend",
+                           ifelse((sero$med_prov == 1 | sero$c_oth == 1), "med provider/other", NA)))
+    # freq for variable levels, freq positive, combine
+      com_cont_relat_freq <- data.frame(sero %>% group_by(com_cont_relat) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      com_cont_relat_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(com_cont_relat) %>% summarise(n_pos=n()))
+      com_cont_relat_uni <- merge(com_cont_relat_freq, com_cont_relat_freq_pos)
+    # format
+      names(com_cont_relat_uni)[names(com_cont_relat_uni) == 'com_cont_relat'] <- 'category'
+      com_cont_relat_uni$variable <- "Community contact relation"
+   
+# community contact location
+  # freq for variable levels, freq positive, combine
+    any_exp_freq <- data.frame(sero %>% group_by(any_exp) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+    any_exp_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(any_exp) %>% summarise(n_pos=n()))
+    com_loc_any_uni <- merge(any_exp_freq, any_exp_freq_pos)
+  # format
+    names(com_loc_any_uni)[names(com_loc_any_uni) == 'any_exp'] <- 'category'
+    com_loc_any_uni$variable <- "Known community exposure location"
+    
+    
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_com_cont <- rbind(com_cont_uni, com_days_uni, com_cont_relat_uni, com_loc_any_uni)
+  # reorder columns, calculate percent positive
+    uni_results_com_cont <- uni_results_com_cont[, c(5,1,2,3,4)]
+    uni_results_com_cont$prop <- uni_results_com_cont$prop*100
+    uni_results_com_cont$perc_pos <- uni_results_com_cont$n_pos/uni_results_com_cont$n*100
+  # format
+    uni_results_com_cont$prop <- format(round(uni_results_com_cont$prop, digits=1), nsmall=1)
+    uni_results_com_cont$perc_pos <- format(round(uni_results_com_cont$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_com_cont$prop_percent_part1 <- paste(uni_results_com_cont$n, uni_results_com_cont$prop, sep=" (")
+      uni_results_com_cont$prop_percent_part2 <- ")"
+      uni_results_com_cont$prop_percent <- paste(uni_results_com_cont$prop_percent_part1, uni_results_com_cont$prop_percent_part2, sep="")
+          uni_results_com_cont$prop_percent_part1 <- NULL
+          uni_results_com_cont$prop_percent_part2 <- NULL
+      uni_results_com_cont$pos_percent_part1 <- paste(uni_results_com_cont$n_pos, uni_results_com_cont$perc_pos, sep=" (")
+      uni_results_com_cont$pos_percent_part2 <- ")"
+      uni_results_com_cont$pos_percent <- paste(uni_results_com_cont$pos_percent_part1, uni_results_com_cont$pos_percent_part2, sep="")
+          uni_results_com_cont$pos_percent_part1 <- NULL
+          uni_results_com_cont$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_com_cont_table <- uni_results_com_cont %>% dplyr::select(variable, category, prop_percent, pos_percent)
+    # format variable names, category codes
+      names(uni_results_com_cont_table)[names(uni_results_com_cont_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_com_cont_table)[names(uni_results_com_cont_table) == "pos_percent"] <- "n positive (%)"
+      uni_results_com_cont_table$category <- ifelse(uni_results_com_cont_table$category == 0, "no",
+                                         ifelse(uni_results_com_cont_table$category == 1, "yes", uni_results_com_cont_table$category))
+    # print table  
+      kable(uni_results_com_cont_table, format = "html", table.attr = "style='width:80%;'")      
+    
+``` 
+<br/>
+ 
+#### Workplace contact
+* **Contact w/ known positive patient**- provided direct patient care to a patient(s) known to be positive
+* **Contact w/ unknown positive patient**- cared for patients who, while not on isolation precautions, were tested and found to be positive
+* **Contact w/ positive staff**- close contact with other healthcare worker(s) found to have COVID-19 during the time period the participant was exposed to her/him
+* **Staff contact days**- number of days exposed to positive healthcare worker
+* **Any occupational contact**- exposure to a known or unknown positive patient or healthcare worker
+<br/>
+<br/>
+
+```{r, echo=FALSE, message=FALSE}
+# workplace contact
+  # confirmed patients  
+    # freq for variable levels, freq positive, combine
+      care_freq <- data.frame(sero %>% group_by(care_c) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      care_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(care_c) %>% summarise(n_pos=n()))
+      care_uni <- merge(care_freq, care_freq_pos)
+    # format
+      names(care_uni)[names(care_uni) == 'care_c'] <- 'category'
+      care_uni$variable <- "Contact w/ known positive patient"
+
+      
+  # covid patient not on isolation procedures
+    # freq for variable levels, freq positive, combine
+      care_unkn_freq <- data.frame(sero %>% group_by(pt_pos) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      care_unkn_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(pt_pos) %>% summarise(n_pos=n()))
+      care_unkn_uni <- merge(care_unkn_freq, care_unkn_freq_pos)
+    # format
+      names(care_unkn_uni)[names(care_unkn_uni) == 'pt_pos'] <- 'category'
+      care_unkn_uni$variable <- "Contact w/ unknown positive patient"  
+ 
+      
+  # other healthcare workers (staff)
+    # freq for variable levels, freq positive, combine
+      staff_freq <- data.frame(sero %>% group_by(staff_pos) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+      staff_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(staff_pos) %>% summarise(n_pos=n()))
+      staff_uni <- merge(staff_freq, staff_freq_pos)
+    # format
+      names(staff_uni)[names(staff_uni) == 'staff_pos'] <- 'category'
+      staff_uni$variable <- "Contact w/ positive staff" 
+    
+    # exposure days
+      # format variable into ordered factor
+        sero$staff_cont_days <- ifelse(sero$staff_pos_days == 1, "1-5", 
+                                ifelse(sero$staff_pos_days == 2, "6-10",
+                                ifelse(sero$staff_pos_days == 3, "11+", NA)))
+        sero$staff_cont_days <- relevel(as.factor(sero$staff_cont_days), ref = "1-5")
+        # freq for variable levels, freq positive, combine
+          staff_days_freq <- data.frame(sero %>% group_by(staff_cont_days) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+          staff_days_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(staff_cont_days) %>% summarise(n_pos=n()))
+          staff_days_uni <- merge(staff_days_freq, staff_days_freq_pos)
+        # format
+          names(staff_days_uni)[names(staff_days_uni) == 'staff_cont_days'] <- 'category'
+          staff_days_uni$variable <- "Staff contact days"
+    
+          
+  # any workplace contact      
+    # create variable for any workplace contact
+      sero$any_occ_cont <- ifelse((sero$care_c == 1 | sero$staff_pos == 1), 1,
+                           ifelse((sero$care_c == 0 & sero$staff_pos == 0), 0, NA))
+      # freq for variable levels, freq positive, combine
+        any_occ_freq <- data.frame(sero %>% group_by(any_occ_cont) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        any_occ_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(any_occ_cont) %>% summarise(n_pos=n()))
+        any_occ_uni <- merge(any_occ_freq, any_occ_freq_pos)
+      # format
+        names(any_occ_uni)[names(any_occ_uni) == 'any_occ_cont'] <- 'category'
+        any_occ_uni$variable <- "Any occupational contact"
+        
+  
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_occ_cont <- rbind(care_uni, care_unkn_uni, staff_uni, staff_days_uni, any_occ_uni)
+  # reorder columns, calculate percent positive
+    uni_results_occ_cont <- uni_results_occ_cont[, c(5,1,2,3,4)]
+    uni_results_occ_cont$prop <- uni_results_occ_cont$prop*100
+    uni_results_occ_cont$perc_pos <- uni_results_occ_cont$n_pos/uni_results_occ_cont$n*100
+  # format
+    uni_results_occ_cont$prop <- format(round(uni_results_occ_cont$prop, digits=1), nsmall=1)
+    uni_results_occ_cont$perc_pos <- format(round(uni_results_occ_cont$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_occ_cont$prop_percent_part1 <- paste(uni_results_occ_cont$n, uni_results_occ_cont$prop, sep=" (")
+      uni_results_occ_cont$prop_percent_part2 <- ")"
+      uni_results_occ_cont$prop_percent <- paste(uni_results_occ_cont$prop_percent_part1, uni_results_occ_cont$prop_percent_part2, sep="")
+          uni_results_occ_cont$prop_percent_part1 <- NULL
+          uni_results_occ_cont$prop_percent_part2 <- NULL
+      uni_results_occ_cont$pos_percent_part1 <- paste(uni_results_occ_cont$n_pos, uni_results_occ_cont$perc_pos, sep=" (")
+      uni_results_occ_cont$pos_percent_part2 <- ")"
+      uni_results_occ_cont$pos_percent <- paste(uni_results_occ_cont$pos_percent_part1, uni_results_occ_cont$pos_percent_part2, sep="")
+          uni_results_occ_cont$pos_percent_part1 <- NULL
+          uni_results_occ_cont$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_occ_cont_table <- uni_results_occ_cont %>% dplyr::select(variable, category, prop_percent, pos_percent)
+    # format variable names, category codes
+      names(uni_results_occ_cont_table)[names(uni_results_occ_cont_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_occ_cont_table)[names(uni_results_occ_cont_table) == "pos_percent"] <- "n positive (%)"
+      uni_results_occ_cont_table$category <- ifelse(uni_results_occ_cont_table$category == 0, "no",
+                                         ifelse(uni_results_occ_cont_table$category == 1, "yes", uni_results_occ_cont_table$category))
+    # print table  
+      kable(uni_results_occ_cont_table, format = "html", table.attr = "style='width:80%;'")  
+```
+<br/>
+
+#### PPE use/importance
+* **PPE use (categorical)**- assessment recommended PPE use while caring for patients with known/suspected COVID-19
+  * _as recommended_- always used recommended PPE and paid close attention to donning and doffing
+  * _not as recommended_- had numerous instances where I was not using recommended PPE
+  * _unsure_- wore PPE but unsure if I was always using properly 
+  * _not specified_- did not answer survey question
+* **PPE importance**- please rate how important you consider PPE, particularly masks, as compared to hand hygiene in preventing COVID-19 infection
+  * PPE (especially masks) definitely most important
+  * PPE slightly more important
+  * PPE and hand hygiene equally important
+  * Hand hygiene more important
+  * Hand hygiene definitely most important
+<br/>
+<br/>
+
+```{r, echo=FALSE, message=FALSE}
+ 
+  # PPE while working with confirmed/suspected covid patients
+    # create 3-level PPE use variable (ordered factor)
+      # 1 = used as recommended, 2 = unsure if used properly, 3 = not as recommended
+      sero$ppe_use <- ifelse(sero$ppe_rec == 1, 1,
+                      ifelse(sero$ppe_unsure == 1, 2, 
+                      ifelse(sero$ppe_no_rec == 1, 3, NA)))
+      sero$ppe_use_cat <- ifelse(sero$ppe_rec == 1, "as recommended",
+                          ifelse(sero$ppe_unsure == 1, "unsure", 
+                          ifelse(sero$ppe_no_rec == 1, "not as recommended", "not specified")))
+      sero$ppe_use_cat <- relevel(as.factor(sero$ppe_use_cat), ref = "as recommended")
+      # freq for variable levels, freq positive, combine
+        ppe_use_freq <- data.frame(sero %>% group_by(ppe_use_cat) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        ppe_use_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ppe_use_cat) %>% summarise(n_pos=n()))
+        ppe_use_uni <- merge(ppe_use_freq, ppe_use_freq_pos)
+      # format
+        names(ppe_use_uni)[names(ppe_use_uni) == 'ppe_use_cat'] <- 'category'
+        ppe_use_uni$variable <- "PPE use (categ)"
+      
+  # importance of PPE 
+    # creating categorical variable
+      sero[c("ppe_1", "ppe_2", "ppe_3", "ppe_4", "ppe_5")][is.na(sero[c("ppe_1", "ppe_2", "ppe_3", "ppe_4", 
+      "ppe_5")])] <- 0
+      sero$ppe_impor <- ifelse(sero$ppe_1 == 1, "1",
+                        ifelse(sero$ppe_2 == 1, "2",
+                        ifelse(sero$ppe_3 == 1, "3",
+                        ifelse(sero$ppe_4 == 1, "4",
+                        ifelse(sero$ppe_5 == 1, "5", NA)))))
+      sero$ppe_impor <- relevel(as.factor(sero$ppe_impor), ref = "1")
+      # freq for variable levels, freq positive, combine
+        ppe_impor_freq <- data.frame(sero %>% group_by(ppe_impor) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+        ppe_impor_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ppe_impor) %>% summarise(n_pos=n()))
+        ppe_impor_uni <- merge(ppe_impor_freq, ppe_impor_freq_pos)
+      # format
+        names(ppe_impor_uni)[names(ppe_impor_uni) == 'ppe_impor'] <- 'category'
+        ppe_impor_uni$variable <- "PPE importance"
+  
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_ppe <- rbind(ppe_use_uni, ppe_impor_uni)
+  # reorder columns, calculate percent positive
+    uni_results_ppe <- uni_results_ppe[, c(5,1,2,3,4)]
+    uni_results_ppe$prop <- uni_results_ppe$prop*100
+    uni_results_ppe$perc_pos <- uni_results_ppe$n_pos/uni_results_ppe$n*100
+  # format
+    uni_results_ppe$prop <- format(round(uni_results_ppe$prop, digits=1), nsmall=1)
+    uni_results_ppe$perc_pos <- format(round(uni_results_ppe$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_ppe$prop_percent_part1 <- paste(uni_results_ppe$n, uni_results_ppe$prop, sep=" (")
+      uni_results_ppe$prop_percent_part2 <- ")"
+      uni_results_ppe$prop_percent <- paste(uni_results_ppe$prop_percent_part1, uni_results_ppe$prop_percent_part2, sep="")
+          uni_results_ppe$prop_percent_part1 <- NULL
+          uni_results_ppe$prop_percent_part2 <- NULL
+      uni_results_ppe$pos_percent_part1 <- paste(uni_results_ppe$n_pos, uni_results_ppe$perc_pos, sep=" (")
+      uni_results_ppe$pos_percent_part2 <- ")"
+      uni_results_ppe$pos_percent <- paste(uni_results_ppe$pos_percent_part1, uni_results_ppe$pos_percent_part2, sep="")
+          uni_results_ppe$pos_percent_part1 <- NULL
+          uni_results_ppe$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_ppe_table <- uni_results_ppe %>% dplyr::select(variable, category, prop_percent, pos_percent)
+    # format variable names, category codes
+      names(uni_results_ppe_table)[names(uni_results_ppe_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_ppe_table)[names(uni_results_ppe_table) == "pos_percent"] <- "n positive (%)"
+    # print table  
+      kable(uni_results_ppe_table, format = "html", table.attr = "style='width:80%;'") 
+```
+<br/>
+
+#### Previous illness & symptoms
+<br/>
+<br/>
+
+```{r, echo=FALSE, message=FALSE}
+
+# additional descriptive stats
+
+# illness but not test
+  ill_no_test_freq <- data.frame(sero %>% group_by(ill_no_test) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+  ill_no_test_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ill_no_test) %>% summarise(n_pos=n()))
+  ill_no_test_uni <- merge(ill_no_test_freq, ill_no_test_freq_pos)
+  # format
+    names(ill_no_test_uni)[names(ill_no_test_uni) == 'ill_no_test'] <- 'category'
+    ill_no_test_uni$variable <- "Illness, no COVID-19 test" 
+    
+# illness but tested negative
+  ill_neg_cov_freq <- data.frame(sero %>% group_by(ill_neg_cov) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+  ill_neg_cov_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ill_neg_cov) %>% summarise(n_pos=n()))
+  ill_neg_cov_uni <- merge(ill_neg_cov_freq, ill_neg_cov_freq_pos)
+  # format
+    names(ill_neg_cov_uni)[names(ill_neg_cov_uni) == 'ill_neg_cov'] <- 'category'
+    ill_neg_cov_uni$variable <- "Illness, negative COVID-19 test"       
+    
+ # previous positive covid test
+  ill_cov_freq <- data.frame(sero %>% group_by(ill_cov) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+  ill_cov_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(ill_cov) %>% summarise(n_pos=n()))
+  ill_cov_uni <- merge(ill_cov_freq, ill_cov_freq_pos)
+  # format
+    names(ill_cov_uni)[names(ill_cov_uni) == 'ill_cov'] <- 'category'
+    ill_cov_uni$variable <- "Previous positive COVID-19 test"      
+           
+ # previous illness (any test status)
+  any_ill_freq <- data.frame(sero %>% group_by(any_ill) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+  any_ill_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(any_ill) %>% summarise(n_pos=n()))
+  any_ill_uni <- merge(any_ill_freq, any_ill_freq_pos)
+  # format
+    names(any_ill_uni)[names(any_ill_uni) == 'any_ill'] <- 'category'
+    any_ill_uni$variable <- "Previous illness (regardless of test status)"      
+    
+# any symptoms (among those who had previous illness)
+  any_symptom_freq <- data.frame(sero %>% group_by(any_symptom) %>% summarise(n=n()) %>% mutate(prop=n/sum(n))) 
+  any_symptom_freq_pos <- data.frame(sero %>% filter(covid == 1) %>% group_by(any_symptom) %>% summarise(n_pos=n()))
+  any_symptom_uni <- merge(any_symptom_freq, any_symptom_freq_pos)
+  # format
+    names(any_symptom_uni)[names(any_symptom_uni) == 'any_symptom'] <- 'category'
+    any_symptom_uni$variable <- "Any symptoms (among those w/ previous illness)"    
+    
+    
+# combine univariate results into one datafile and table
+  # combine results
+    uni_results_ill <- rbind(ill_no_test_uni, ill_neg_cov_uni, ill_cov_uni, any_ill_uni, any_symptom_uni)
+  # reorder columns, calculate percent positive
+    uni_results_ill <- uni_results_ill[, c(5,1,2,3,4)]
+    uni_results_ill$prop <- uni_results_ill$prop*100
+    uni_results_ill$perc_pos <- uni_results_ill$n_pos/uni_results_ill$n*100
+  # format
+    uni_results_ill$prop <- format(round(uni_results_ill$prop, digits=1), nsmall=1)
+    uni_results_ill$perc_pos <- format(round(uni_results_ill$perc_pos, digits=1), nsmall=1)
+    # n(%) for each variable category and positivity
+      uni_results_ill$prop_percent_part1 <- paste(uni_results_ill$n, uni_results_ill$prop, sep=" (")
+      uni_results_ill$prop_percent_part2 <- ")"
+      uni_results_ill$prop_percent <- paste(uni_results_ill$prop_percent_part1, uni_results_ill$prop_percent_part2, sep="")
+          uni_results_ill$prop_percent_part1 <- NULL
+          uni_results_ill$prop_percent_part2 <- NULL
+      uni_results_ill$pos_percent_part1 <- paste(uni_results_ill$n_pos, uni_results_ill$perc_pos, sep=" (")
+      uni_results_ill$pos_percent_part2 <- ")"
+      uni_results_ill$pos_percent <- paste(uni_results_ill$pos_percent_part1, uni_results_ill$pos_percent_part2, sep="")
+          uni_results_ill$pos_percent_part1 <- NULL
+          uni_results_ill$pos_percent_part2 <- NULL
+  # table  
+    # select formatted variables
+      uni_results_ill_table <- uni_results_ill %>% dplyr::select(variable, category, prop_percent, pos_percent)
+    # format variable names, category codes
+      names(uni_results_ill_table)[names(uni_results_ill_table) == "prop_percent"] <- "n (%)"
+      names(uni_results_ill_table)[names(uni_results_ill_table) == "pos_percent"] <- "n positive (%)"
+      uni_results_ill_table$category <- ifelse(uni_results_ill_table$category == 0, "no",
+                                             ifelse(uni_results_ill_table$category == 1, "yes", uni_results_ill_table$category))
+
+    # print table  
+      kable(uni_results_ill_table, format = "html", table.attr = "style='width:80%;'")   
+```    
+    
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# merge with weights-- by age group, sex, race
+  # pull in weights
+    weights <- read.csv("/Users/juliabaker/Box Sync/Emory HCW serosurvey/Data/weights.out.new.csv")
+    weights$X <- NULL
+  # merge with survey data
+    sero <- merge(sero, weights, all.x = TRUE)
+
+```
+<br/>
+<br/>
+
+### Bivariate (unadjusted) analysis
+
+* Examining each individual variable's association with serostatus (unadusted for other variables)
+* Used to help guide the structure of the regression model (see Multivariable analysis section below)
+* Reference categories noted in table footnotes
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+# list of variables for bivariate analysis 
+  varlist <- c('week', 'age_group', 'sex', 'race', 'eth', 
+               'inc', 'log_inc',
+               'job_role', 
+               'ms_cohort', 'ms_no_cohort', 'icu_cohort', 'icu_no_cohort', 'periop', 'proc', 
+               'ed', 'other_area', 'clin_cohort', 'clin_no_cohort', 'non_clin', 'not_hc', 'wfh',
+               'job_loc_cat_9',
+               'any_com_cont', 'com_cont_days', 'com_cont_relat', 'any_exp', 
+               'any_occ_cont', 'care_c', 'pt_pos', 'staff_pos', 'staff_cont_days',
+               'ppe_use_cat', 'ppe_impor')
+
+# function to run models (and combine into a list):
+  bi_models <- lapply(varlist, function(x) {
+    glm(substitute(covid ~ i, list(i = as.name(x))), data = sero, family = "binomial")
+    })
+
+# function to extract results of interest and create dataframe of result
+  extract_glm <- function(res){
+    category <- variable.names(res) 
+    or <- exp((res)$coeff)
+    lci <- exp(confint(res)[,1])
+    uci <- exp(confint(res)[,2])
+    p_val <- coef(summary(res))[,4]
+    output <- data.frame(category, or, lci, uci, p_val)
+    output
+  }
+
+# apply function to extract output to the models
+  bi_results <- lapply(bi_models, extract_glm)
+  bi_results_df <- do.call(rbind, bi_results)
+
+  # formatting
+    rownames(bi_results_df) <- NULL
+    # drop observations for "intercept"
+      bi_results_df <- bi_results_df[!grepl("(Intercept)", bi_results_df$category),]
+    # adding category group
+      bi_results_df$variable <- ifelse((bi_results_df$category %like% "week"), "Week of test", 
+                                ifelse((bi_results_df$category %like% "age_group"), "Age group", 
+                                ifelse((bi_results_df$category %like% "sex"), "Sex", 
+                                ifelse((bi_results_df$category %like% "race"), "Race", 
+                                ifelse((bi_results_df$category %like% "eth"), "Ethnicity", 
+                                ifelse((bi_results_df$category %like% "log_inc"), "Log(incidence)", 
+                                ifelse((bi_results_df$category %like% "inc"), "Incidence", 
+                                ifelse((bi_results_df$category %like% "job_role"), "Job role", 
+                                ifelse((bi_results_df$category %like% "job_loc_cat"), "Job location (categ)", 
+                                ifelse((bi_results_df$category %like% "any_com_cont"), "Community contact", 
+                                ifelse((bi_results_df$category %like% "com_cont_days"), "Community contact days", 
+                                ifelse((bi_results_df$category %like% "com_cont_rel"), "Community contact relation", 
+                                ifelse((bi_results_df$category %like% "any_exp"), "Known community exposure location",
+                                ifelse((bi_results_df$category %like% "any_occ_cont"), "Workplace contact",
+                                ifelse((bi_results_df$category %like% "care_c"), "Contact w/ known positive patient",
+                                ifelse((bi_results_df$category %like% "pt_pos"), "Contact w/ unknown positive patient",
+                                ifelse((bi_results_df$category %like% "staff_pos"), "Contact w/ positive staff",
+                                ifelse((bi_results_df$category %like% "staff_cont_days"), "Staff contact days", 
+                                ifelse((bi_results_df$category %like% "ppe_use_cat"), "PPE use (categ)", 
+                                ifelse((bi_results_df$category %like% "ppe_impor"), "PPE importance", 
+                                "Job location"))))))))))))))))))))
+    # reorder columns & drop row names
+      bi_results_df <- bi_results_df[, c(6,1,2,3,4,5)]
+    # cleaning category descriptions
+      bi_results_df$category <- str_remove(bi_results_df$category, "age_group") 
+      bi_results_df$category <- str_remove(bi_results_df$category, "sex") 
+      bi_results_df$category <- str_remove(bi_results_df$category, "race")  
+      bi_results_df$category <- str_remove(bi_results_df$category, "eth") 
+      bi_results_df$category <- str_remove(bi_results_df$category, "job_role")  
+      bi_results_df$category <- str_remove(bi_results_df$category, "job_cat") 
+      bi_results_df$category <- str_remove(bi_results_df$category, "job_loc_cat_9") 
+      bi_results_df$category <- str_remove(bi_results_df$category, "com_cont_days")
+      bi_results_df$category <- str_remove(bi_results_df$category, "com_cont_relat")
+      bi_results_df$category <- str_remove(bi_results_df$category, "staff_cont_days")
+      bi_results_df$category <- str_remove(bi_results_df$category, "ppe_use_cat")
+    # cleaning y/n category names
+      bi_results_df$category <- ifelse((bi_results_df$category == "any_com_cont" |
+                                         bi_results_df$category == "any_exp" |
+                                         bi_results_df$category == "any_occ_cont" |
+                                         bi_results_df$category == "care_c" |
+                                         bi_results_df$category == "pt_pos" |
+                                         bi_results_df$category == "staff_pos"), "y/n", bi_results_df$category)
+      bi_results_df$category <- ifelse(bi_results_df$category == "ms_cohort", "medical-surgical- focused on COVID-19 patients",
+                                 ifelse(bi_results_df$category == "ms_no_cohort", "medical-surgical- not focused on COVID-19 patients",
+                                 ifelse(bi_results_df$category == "icu_cohort", "ICU- focused on COVID-19 patients",
+                                 ifelse(bi_results_df$category == "icu_no_cohort", "ICU- not focused on COVID-19 patients",
+                                 ifelse(bi_results_df$category == "periop", "OR or peri-operative area",
+                                 ifelse(bi_results_df$category == "proc", "other procedure area",
+                                 ifelse(bi_results_df$category == "ed", "emergency department",
+                                 ifelse(bi_results_df$category == "other_area", "other hospital area",
+                                 ifelse(bi_results_df$category == "clin_cohort", "clinic- focused on COVID-19 patients",
+                                 ifelse(bi_results_df$category == "clin_no_cohort", "clinic- not focused on COVID-19 patients",
+                                 ifelse(bi_results_df$category == "non_clin", "non-clinical area of hospital or clinic",
+                                 ifelse(bi_results_df$category == "not_hc", "not in hospital or clinic",
+                                 ifelse(bi_results_df$category == "wfh", "worked from home", 
+                                 bi_results_df$category)))))))))))))
+    # reduce decimals
+      bi_results_df$or  <- round(bi_results_df$or, digits = 1)
+      bi_results_df$lci  <- round(bi_results_df$lci, digits = 1)
+      bi_results_df$uci  <- round(bi_results_df$uci, digits = 1)
+      bi_results_df$p_val  <- round(bi_results_df$p_val, digits = 3)
+    # combining OR and CI into one column
+      bi_results_df$OR_CI_part1 <- paste(format(round(bi_results_df$or, digits=1), nsmall=1), 
+                                         format(round(bi_results_df$lci, digits=1), nsmall=1), sep=" (")
+      bi_results_df$OR_CI_part2 <- paste(bi_results_df$OR_CI_part1, 
+                                         format(round(bi_results_df$uci, digits=1), nsmall=1), sep=",")
+      bi_results_df$OR_CI_part3 <- ")"
+      bi_results_df$unadj_OR_CI <- paste(bi_results_df$OR_CI_part2, bi_results_df$OR_CI_part3, sep="")
+        bi_results_df$OR_CI_part1 <- NULL
+        bi_results_df$OR_CI_part2 <- NULL
+        bi_results_df$OR_CI_part3 <- NULL
+        bi_results_df$or <- NULL
+        bi_results_df$lci <- NULL
+        bi_results_df$uci <- NULL
+        bi_results_df <- bi_results_df[, c(1,2,4,3)]
+   rownames(bi_results_df) <- NULL
+ # subset dataframe for presentation of results
+    bi_results_df_demog     <- bi_results_df[which(bi_results_df$variable == "Week of test" |
+                                                   bi_results_df$variable == "Age group" |
+                                                   bi_results_df$variable == "Sex" |
+                                                   bi_results_df$variable == "Race" |
+                                                   bi_results_df$variable == "Ethnicity"),]
+                               rownames(bi_results_df_demog) <- NULL
+    bi_results_df_inc       <- bi_results_df[which(bi_results_df$variable == "Incidence" | 
+                                                   bi_results_df$variable == "Log(incidence)"),]
+                               rownames(bi_results_df_inc) <- NULL
+    bi_results_df_work_role <- bi_results_df[which(bi_results_df$variable == "Job role"),]
+                               rownames(bi_results_df_work_role) <- NULL
+    bi_results_df_job_loc   <- bi_results_df[which(bi_results_df$variable == "Job location" |
+                                                   bi_results_df$variable == "Job location (categ)"),]
+                               rownames(bi_results_df_job_loc) <- NULL
+    bi_results_df_com_cont  <- bi_results_df[which(bi_results_df$variable == "Community contact" |
+                                                   bi_results_df$variable == "Community contact days" |
+                                                   bi_results_df$variable == "Community contact relation" |
+                                                   bi_results_df$variable == "Known community exposure location"),]
+                               rownames(bi_results_df_com_cont) <- NULL
+    bi_results_df_work_cont <- bi_results_df[which(bi_results_df$variable == "Contact w/ known positive patient" |
+                                                   bi_results_df$variable == "Contact w/ unknown positive patient" |
+                                                   bi_results_df$variable == "Contact w/ positive staff" |
+                                                   bi_results_df$variable == "Staff contact days"),]
+                               rownames(bi_results_df_work_cont) <- NULL
+    bi_results_df_ppe       <- bi_results_df[which(bi_results_df$variable == "PPE use (categ)" |
+                                                   bi_results_df$variable == "PPE importance"), ]
+                               rownames(bi_results_df_ppe) <- NULL
+```
+<br/>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+    
+    bi_results_df_demog_table <- kable(bi_results_df_demog, 
+                                    caption = "Serology & demographics", 
+                                    format = "html", table.attr = "style='width:80%;'")
+      add_footnote(bi_results_df_demog_table, 
+                   c("Ref: age group=60+, sex=F, race=white, ethnicity=non-Hisp"), 
+                   notation = "symbol")
+```
+<br/>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}    
+    bi_results_df_inc_table <- kable(bi_results_df_inc, 
+                                     caption = "Incidence (by zip)", format = "html", 
+                                     table.attr = "style='width:80%;'")
+        add_footnote(bi_results_df_inc_table, 
+                     c("Cumulative incidence (by zip code) measured 2 weeks prior to testing"), 
+                     notation = "symbol")
+```
+<br/>
+   
+```{r, echo=FALSE, message=FALSE, warning=FALSE}   
+    bi_results_df_work_role_table <- kable(bi_results_df_work_role, 
+                                        caption = "Workplace role", format = "html", 
+                                        table.attr = "style='width:80%;'")
+        add_footnote(bi_results_df_work_role_table, 
+                     c("Ref: job role=Other w/ no patient contact"), 
+                     notation = "symbol")
+```
+<br/>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}   
+    bi_results_df_job_loc_table <- kable(bi_results_df_job_loc, 
+                                        caption = "Workplace location", format = "html", 
+                                        table.attr = "style='width:80%;'")
+        add_footnote(bi_results_df_job_loc_table, 
+                     c("Ref: job location (categ)=no patient contact"), 
+                     notation = "symbol")
+```
+<br/>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}     
+    bi_results_df_com_cont_table <- kable(bi_results_df_com_cont, 
+                                       caption = "Community contact", format = "html", 
+                                       table.attr = "style='width:80%;'")
+        add_footnote(bi_results_df_com_cont_table, 
+                     c("Ref: contact days=0-5, contact relationship=immed fam/hh"), 
+                     notation = "symbol")
+```
+<br/>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}    
+    bi_results_df_work_cont_table <- kable(bi_results_df_work_cont, 
+                                        caption = "Workplace contact", format = "html", 
+                                        table.attr = "style='width:80%;'")
+        add_footnote(bi_results_df_work_cont_table, 
+                     c("Ref: contact days=0-5"), 
+                     notation = "symbol")
+```
+<br/>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}    
+    bi_results_df_ppe_table <- kable(bi_results_df_ppe, 
+                                  caption = "PPE", format = "html", 
+                                  table.attr = "style='width:80%;'")
+        add_footnote(bi_results_df_ppe_table, 
+                     c("Ref: ppe use (categ)=as recommended"), 
+                     notation = "symbol")
+
+```
+<br/>
+<br/>
+
+### Multivariable analysis
+* Methods:
+  * Logistic regression
+  * Variables pre-specified for inclusion based on bivariate analysis and our understanding of their relationships to one another
+  * Full model, no variables dropped (i.e. no backwards elimination performed to simplify the model)
+  * Reference groups noted in footnotes
+<br/>
+  * "Unweight" model describes adjusted odds ratios (adjusted for all other variables in the model) but not adjusted for potential participation bias
+  * "Weighted_svy" model is further adjusted to account for potential participation bias.  Used inverse probability of participation weighting (by age, race, sex)
+
+
+<br/>
+<br/>
+
+```{r,  echo=FALSE, message=FALSE, warning=FALSE}
+
+### NEW MODEL APPROACH ###
+###    AUG 11, 2020    ###
+# unweighted model
+
+# model 3- Aug 11
+  m3 <- glm(covid ~ race + eth + log_inc +
+                    age_group + 
+                    job_role + job_loc_cat_9 + 
+                    any_com_cont + 
+                    care_c + pt_pos + staff_pos +
+                    ppe_use_cat, 
+                    data = sero, family = "binomial")
+
+
+  # results  
+  # summary(m3)
+    m3_coeff <- exp(cbind(OR = coef(m3), confint(m3)))
+    m3_p_val <- summary(m3)$coefficients[,4]
+    m3_results <- round((cbind(m3_coeff, m3_p_val)), 3) 
+    prelim_results <- data.frame(m3_results)
+  
+  # formatting
+    # rename/reorder columns
+      setDT(prelim_results, keep.rownames = "category")
+      names(prelim_results)[names(prelim_results) == "X2.5.."] <- "LCI"
+      names(prelim_results)[names(prelim_results) == "X97.5.."] <- "UCI"
+      names(prelim_results)[names(prelim_results) == "m3_p_val"] <- "p_val"
+    # creating "variable" column
+      prelim_results$variable <- ifelse((prelim_results$category %like% "Intercept"), "Intercept",
+                                 ifelse((prelim_results$category %like% "week"), "Week of test",
+                                 ifelse((prelim_results$category %like% "race"), "Race",
+                                 ifelse((prelim_results$category %like% "eth"), "Ethnicity",
+                                 ifelse((prelim_results$category %like% "log_inc"), "Log(incidence)",
+                                 ifelse((prelim_results$category %like% "age_group"), "Age group",
+                                 ifelse((prelim_results$category %like% "job_role"), "Job role",
+                                 ifelse((prelim_results$category %like% "job_loc"), "Job location (categ)",       
+                                 ifelse((prelim_results$category %like% "any_com_cont"), "Community contact",
+                                 ifelse((prelim_results$category %like% "care_c"), "Contact w/ known positive patient",
+                                 ifelse((prelim_results$category %like% "pt_pos"), "Contact w/ unknown positive patient",
+                                 ifelse((prelim_results$category %like% "staff_pos"), "Contact w/ positive staff",
+                                 ifelse((prelim_results$category %like% "ppe_use"), "PPE use (categ)", NA)))))))))))))
+    # reorder columns
+      prelim_results <- prelim_results[, c(6,1,2,3,4,5)]
+    # cleaning category descriptions
+      prelim_results$category <- str_remove(prelim_results$category, "race") 
+      prelim_results$category <- str_remove(prelim_results$category, "eth") 
+      prelim_results$category <- str_remove(prelim_results$category, "job_loc_cat_9") 
+      prelim_results$category <- str_remove(prelim_results$category, "age_group") 
+      prelim_results$category <- str_remove(prelim_results$category, "job_role") 
+      prelim_results$category <- str_remove(prelim_results$category, "ppe_use_cat")
+      prelim_results$category <- ifelse(prelim_results$category == "not_spec", "not specified", prelim_results$category)
+      prelim_results$category <- ifelse((prelim_results$category == "any_com_cont" |
+                                        prelim_results$category == "care_c" |
+                                        prelim_results$category == "pt_pos"|
+                                        prelim_results$category == "staff_pos"), "y/n", prelim_results$category)
+    # reduce decimals
+      prelim_results$OR  <- round(prelim_results$OR, digits = 1)
+      prelim_results$LCI  <- round(prelim_results$LCI, digits = 1)
+      prelim_results$UCI  <- round(prelim_results$UCI, digits = 1)
+    # combining OR and CIs into one column
+      prelim_results$OR_CI_part1 <- paste(format(round(prelim_results$OR, digits=1), nsmall=1), 
+                                         format(round(prelim_results$LCI, digits=1), nsmall=1), sep=" (")
+      prelim_results$OR_CI_part2 <- paste(prelim_results$OR_CI_part1, 
+                                         format(round(prelim_results$UCI, digits=1), nsmall=1), sep=",")
+      prelim_results$OR_CI_part3 <- ")"
+      prelim_results$adj_OR_CI_unweight <- paste(prelim_results$OR_CI_part2, prelim_results$OR_CI_part3, sep="")
+          prelim_results$OR_CI_part1 <- NULL
+          prelim_results$OR_CI_part2 <- NULL
+          prelim_results$OR_CI_part3 <- NULL
+          prelim_results$OR <- NULL
+          prelim_results$LCI <- NULL
+          prelim_results$UCI <- NULL
+          prelim_results <- prelim_results[, c(1,2,4,3)]
+          prelim_results <- prelim_results[, c(1,2,3)]
+ 
+```
+<br/>
+<br/>
+
+   
+        
+```{r,  echo=FALSE, message=FALSE, warning=FALSE}
+
+###    AUG 31, 2020    ###
+  # weights added (race, age, sex) using SURVEY package and svyglm
+
+# model 3- with weights using svyglm       
+design <- svydesign(ids=~0, weights=~weight, data=sero)    
+m3w2 <- svyglm(covid ~ race + eth + log_inc +
+                     age_group + 
+                     job_role + job_loc_cat_9 + 
+                     any_com_cont + 
+                     care_c + pt_pos + staff_pos +
+                     ppe_use_cat, 
+                     design=design, family=quasibinomial) 
+
+    #summary(m3w2)
+    m3w2_coeff <- exp(cbind(OR = coef(m3w2), confint(m3w2)))
+    m3w2_p_val <- summary(m3w2)$coefficients[,4]
+    m3w2_results <- round((cbind(m3w2_coeff, m3w2_p_val)), 3) 
+    prelim_results_w2 <- data.frame(m3w2_results)       
+    
+  # formatting
+    # rename/reorder columns
+      setDT(prelim_results_w2, keep.rownames = "category")
+      names(prelim_results_w2)[names(prelim_results_w2) == "X2.5.."] <- "LCI"
+      names(prelim_results_w2)[names(prelim_results_w2) == "X97.5.."] <- "UCI"
+      names(prelim_results_w2)[names(prelim_results_w2) == "m3w2_p_val"] <- "p_val"
+    # creating "variable" column
+      prelim_results_w2$variable <- ifelse((prelim_results_w2$category %like% "Intercept"), "Intercept",
+                                   ifelse((prelim_results_w2$category %like% "week"), "Week of test",
+                                   ifelse((prelim_results_w2$category %like% "race"), "Race",
+                                   ifelse((prelim_results_w2$category %like% "eth"), "Ethnicity",
+                                   ifelse((prelim_results_w2$category %like% "log_inc"), "Log(incidence)",
+                                   ifelse((prelim_results_w2$category %like% "age_group"), "Age group",
+                                   ifelse((prelim_results_w2$category %like% "job_role"), "Job role",
+                                   ifelse((prelim_results_w2$category %like% "job_loc"), "Job location (categ)",       
+                                   ifelse((prelim_results_w2$category %like% "any_com_cont"), "Community contact",
+                                   ifelse((prelim_results_w2$category %like% "care_c"), "Contact w/ known positive patient",
+                                   ifelse((prelim_results_w2$category %like% "pt_pos"), "Contact w/ unknown positive patient",
+                                   ifelse((prelim_results_w2$category %like% "staff_pos"), "Contact w/ positive staff",
+                                   ifelse((prelim_results_w2$category %like% "ppe_use"), "PPE use (categ)", NA)))))))))))))
+    # reorder columns
+      prelim_results_w2 <- prelim_results_w2[, c(6,1,2,3,4,5)]
+    # cleaning category descriptions
+      prelim_results_w2$category <- str_remove(prelim_results_w2$category, "race") 
+      prelim_results_w2$category <- str_remove(prelim_results_w2$category, "eth") 
+      prelim_results_w2$category <- str_remove(prelim_results_w2$category, "job_loc_cat_9") 
+      prelim_results_w2$category <- str_remove(prelim_results_w2$category, "age_group") 
+      prelim_results_w2$category <- str_remove(prelim_results_w2$category, "job_role") 
+      prelim_results_w2$category <- str_remove(prelim_results_w2$category, "ppe_use_cat")
+      prelim_results_w2$category <- ifelse(prelim_results_w2$category == "not_spec", "not specified", prelim_results_w2$category)
+      prelim_results_w2$category <- ifelse((prelim_results_w2$category == "any_com_cont" |
+                                           prelim_results_w2$category == "care_c" |
+                                           prelim_results_w2$category == "pt_pos"|
+                                           prelim_results_w2$category == "staff_pos"), "y/n", prelim_results_w2$category)
+    # reduce decimals
+      prelim_results_w2$OR  <- round(prelim_results_w2$OR, digits = 1)
+      prelim_results_w2$LCI  <- round(prelim_results_w2$LCI, digits = 1)
+      prelim_results_w2$UCI  <- round(prelim_results_w2$UCI, digits = 1)
+    # combining OR and CIs into one column
+      prelim_results_w2$OR_CI_part1 <- paste(format(round(prelim_results_w2$OR, digits=1), nsmall=1), 
+                                            format(round(prelim_results_w2$LCI, digits=1), nsmall=1), sep=" (")
+      prelim_results_w2$OR_CI_part2 <- paste(prelim_results_w2$OR_CI_part1, 
+                                            format(round(prelim_results_w2$UCI, digits=1), nsmall=1), sep=", ")
+      prelim_results_w2$OR_CI_part3 <- ")"
+      prelim_results_w2$adj_OR_CI_svy <- paste(prelim_results_w2$OR_CI_part2, prelim_results_w2$OR_CI_part3, sep="")
+          prelim_results_w2$OR_CI_part1 <- NULL
+          prelim_results_w2$OR_CI_part2 <- NULL
+          prelim_results_w2$OR_CI_part3 <- NULL
+          prelim_results_w2$OR <- NULL
+          prelim_results_w2$LCI <- NULL
+          prelim_results_w2$UCI <- NULL
+          prelim_results_w2 <- prelim_results_w2[, c(1,2,4,3)]
+          prelim_results_w2 <- prelim_results_w2[, c(1,2,3)]
+        
+        
+# merge two results tables      
+  # format column names
+    names(prelim_results_w2)[names(prelim_results_w2) == "adj_OR_CI_svy"] <- "adj_OR_weighted_svy"
+  # merge  
+    prelim_results_comb <- merge(prelim_results, prelim_results_w2)
+    prelim_results_comb$p_val <- NULL
+  # print table
+    prelim_results_comb_table <- kable(prelim_results_comb, caption = "Preliminary results", format = "html") %>%
+        kable_styling(full_width = F)
+        add_footnote(prelim_results_comb_table, 
+        c("Incidence by zip code 2 weeks prior to testing", 
+          "Ref: race=white, ethnicity=non-Hisp, age group=60+, job role=other w/ no patient contact, job location category=work from home; ppe use=as recomm."), 
+        notation = "symbol")               
+```        
+
+
+
+```{r, eval=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+# Attributable fraction calculations
+  # based on: https://www.publichealth.columbia.edu/research/population-health-methods/adjusted-attributable-fractions
+
+sero_no_miss <- sero[which(sero$log_inc >= 0), ]
+
+# setting all occupational variables to reference group-- 
+  # positive staff, job role, job location, positive patient, unknown covid+ patient
+    sero_pred_all_occ <- sero_no_miss
+    sero_pred_all_occ$job_role  <- "Other with no patient contact"
+    sero_pred_all_occ$job_loc_cat_9  <- "Work from home"
+    sero_pred_all_occ$pt_pos <- 0
+    sero_pred_all_occ$care_c <- 0
+    sero_pred_all_occ$staff_pos <- 0
+    sero_pred_all_occ$ppe_use_cat <- "as recommended"
+  # apply model to new dataframe and predict number of cases
+    # resource for calc CI: https://fromthebottomoftheheap.net/2018/12/10/confidence-intervals-for-glms/
+    prob_10 <- data.frame(m3w2 %>% predict(sero_pred_all_occ, type = "response", se.fit=TRUE))
+    save(prob_10, file = "prob_10.RData")  
+    sum(prob_10$response)
+
+    # decide on the number of bootstrap samples
+      n.boot <- 1000
+    # create a distribution around the predicted probabilities from prob_12 (output from predict()), where mean.prob is the predicted prob and se.prob is the SE for the predicted prob for each person
+      pred.boot.all <- list() # each list element is fit from a bootstrap sample
+      for(i in 1:nrow(prob_10)){
+          pred.boot <- rnorm(n.boot, mean =  prob_10[i,1], sd = (prob_10[i,2])*sqrt(9610))
+          pred.boot.all[[i]] <- pred.boot
+          }
+  # for each value (sample) in pred.boot.all, sum across all individuals to get expected cases
+    exp.cases <- list()
+    for(i in 1:n.boot){
+      # create a vector of the ith element in every list
+      sum.pred <- sum(unlist(lapply(pred.boot.all, `[[`, i)))
+      #sum
+      exp.cases[[i]] <- sum.pred
+      }
+    head(exp.cases)
+    exp.cases <- unlist(exp.cases)
+  # then use the median of those samples to create a new distribution of 'nonparametric' bootstrap samples 
+    # have to define a function to calculate the median first
+    samplemedian <- function(x, d) {
+    return(median(x[d]))
+    }
+    dsn.expcases.med = boot(exp.cases, samplemedian, R=n.boot)
+  # calculate the CI from this distribution
+    dsn.expcases.ci = boot.ci(dsn.expcases.med, type="basic")
+    print(dsn.expcases.ci)
+
+```
+<br/>
+<br/>
+
+
+```{r, eval=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+# mapping data by zip code
+#resource: https://austinwehrwein.com/digital-humanities/creating-a-density-map-in-r-with-zipcodes/
+
+
+library(sf)
+
+# download and install archived 'zipcode' package
+url <- "https://cran.r-project.org/src/contrib/Archive/zipcode/zipcode_1.0.tar.gz"
+pkgFile <- "zipcode_1.0.tar.gz"
+download.file(url = url, destfile = pkgFile)
+install.packages(pkgs=pkgFile, type="source", repos=NULL)
+library(zipcode)
+
+data(zipcode)
+
+# simplify dataframe
+ map_data <- sero_no_miss[c("zip","covid")]
+ map_data$one <- 1
+ 
+  zip_agg <- map_data %>%
+              group_by(zip) %>%
+              summarise(n = n(), n_pos =sum(covid))
+
+# merge zip codes and lat/long data
+  zip_latlong <- merge(zip_agg, zipcode, all.x=TRUE)
+  # drop non-GA states
+    zip_latlong <- zip_latlong[ which(zip_latlong$state == "GA"),]
+    sum(zip_latlong$n)
+    # 9609 total observations (n)-- 1 fewer than the 9610 used in final analysis
+    
+# loading zip code shape file
+  # https://catalog.data.gov/dataset/tiger-line-shapefile-2019-2010-nation-u-s-2010-census-5-digit-zip-code-tabulation-area-zcta5-na
+  
+  # load shape file
+    shape <- st_read("/Users/juliabaker/Downloads/tl_2019_us_zcta510/tl_2019_us_zcta510.shp")
+    # format
+      names(shape)[names(shape) == "ZCTA5CE10"] <- "zip"
+    # limit to mostly GA zip codes (some extras)
+      shape$first_two <- substr(shape$zip, 1,2) 
+      shape$first_three <- substr(shape$zip, 1,3) 
+      shape_lim <- shape[(which(shape$first_two == "30" | shape$first_two == "31" | 
+                                shape$first_three == "398" | shape$first_three == "398")),]
+
+# merge shape file with zip codes
+  zip_latlong_shape <- merge(shape_lim, zip_latlong, all.x = TRUE)
+# merge shape file (with zip codes) with incidence data
+  overall_inc <- read.csv("/Users/juliabaker/Box Sync/Emory HCW serosurvey/Data/inc.byzip.csv")
+    names(overall_inc)[names(overall_inc) == "Zip_Residence"] <- "zip"
+    overall_inc$n <- NULL
+    overall_inc$X <- NULL
+    overall_inc$pop2010 <- NULL
+    overall_inc$Land.Sq.Mi <- NULL
+    overall_inc$Dens.Sq.Mi <- NULL
+  zip_latlong_shape <- merge(zip_latlong_shape, overall_inc, all.x = TRUE)
+
+# format, add variables
+  # log incidence
+    zip_latlong_shape$log_inc <- log10(zip_latlong_shape$inc)
+  # suppress n's < 10
+    zip_latlong_shape$n_sup   <- ifelse(zip_latlong_shape$n <10, NA, zip_latlong_shape$n)
+  # drop incidence if no participants in that zip code
+    zip_latlong_shape$inc_partic <- ifelse(zip_latlong_shape$n >= 1, zip_latlong_shape$inc, NA)
+    zip_latlong_shape$log_inc_partic <- log10(zip_latlong_shape$inc_partic)
+  # drop incidence if no participants in that zip code and with n <10
+    zip_latlong_shape$log_inc_partic_sup <- ifelse(zip_latlong_shape$n < 10, NA, zip_latlong_shape$log_inc_partic)
+    zip_latlong_shape$inc_partic_sup <- ifelse(zip_latlong_shape$n < 10, NA, zip_latlong_shape$inc_partic)
+  # proportion positive
+    zip_latlong_shape$prop_pos <- round(zip_latlong_shape$n_pos/zip_latlong_shape$n*100, 1)
+    # suppress if n in zip < 10 or if n pos < 10
+      zip_latlong_shape$prop_pos_sup <- ifelse((zip_latlong_shape$n < 10 | 
+                                                zip_latlong_shape$n_pos < 10), NA,                                                                                    zip_latlong_shape$prop_pos)
+    # suppress if n in zip < 100
+      zip_latlong_shape$prop_pos_sup_100 <- ifelse(zip_latlong_shape$n < 100, NA, zip_latlong_shape$prop_pos)
+    
+# mapping    
+  # zip with n < 10 suppressed 
+    zip_map_sup <- ggplot(data = zip_latlong_shape) +
+                   geom_sf(aes(fill = n_sup),lwd =0.1) +
+                   labs(fill = "Number of participants") +
+                   scale_fill_gradient(low = "slategray1", high = "darkblue", na.value="white") +
+                   theme_bw()
+      pdf("zip_map_sup.pdf")
+      print(zip_map_sup)
+      dev.off()
+      
+  # log(inc) (n < 10 suppressed , only counties with participants) 
+    log_inc_partic_sup_map <- ggplot(data = zip_latlong_shape) +
+                              geom_sf(aes(fill = log_inc_partic_sup),lwd =0.1) +
+                              labs(fill = "Residential COVID-19\nincidence (log10 scale)") +
+                              scale_fill_gradient(low = "olivedrab1", high = "springgreen4", na.value="white") +
+                              theme_bw()
+      pdf("log_inc_partic_sup_map.pdf")
+      print(log_inc_partic_sup_map)
+      dev.off()   
+      
+# printing plots together
+  manuscript_maps <- ggarrange(zip_map_sup, log_inc_partic_sup_map, 
+                     labels = c("A", "B"),
+                     ncol = 1, nrow = 2)
+  pdf("manuscript_maps.pdf")
+      print(manuscript_maps)
+      dev.off()  
+      
+      
+```
+
